@@ -11,13 +11,20 @@ import re
 # CONFIG
 # =========================
 
-SPREADSHEET_ID = st.secrets["google"]["spreadsheet_id"]
-
 YEAR = 2026
+
+ROSTER_SPREADSHEET_ID = st.secrets["google"]["roster_spreadsheet_id"]
+REVIEW_SPREADSHEET_ID = st.secrets["google"]["review_spreadsheet_id"]
+
 REVIEW_TAB = f"Serving Review {YEAR}"
 STATS_TAB = "Serving Statistics"
 
 SCHEDULE_TABS = [
+    "January 2026",
+    "February 2026",
+    "March 2026",
+    "April 2026",
+    "May 2026",
     "June 2026",
     "July 2026",
     "August 2026",
@@ -30,15 +37,14 @@ SCHEDULE_TABS = [
 IGNORE_WORDS = {
     "",
     "x",
-    "X",
     "morning",
     "evening",
     "director",
     "main director",
     "oversight",
     "special needs",
-    "uGroup",
-    "uKids",
+    "ukids",
+    "ugroup",
     "babies",
     "age 1",
     "age 2",
@@ -49,6 +55,31 @@ IGNORE_WORDS = {
     "age 7",
     "age 8",
 }
+
+ROLE_WORDS = [
+    "leader",
+    "director",
+    "assistant",
+    "runner",
+    "greeter",
+    "wiggle",
+    "hall",
+    "sound",
+    "lights",
+    "offering",
+    "announcements",
+    "store",
+    "prep",
+    "outside",
+    "inside",
+    "babies",
+    "age",
+    "ugroup",
+    "ukids",
+    "pre-school",
+    "elementary",
+]
+
 
 # =========================
 # GOOGLE CONNECTION
@@ -66,11 +97,6 @@ def get_client():
     )
 
     return gspread.authorize(credentials)
-
-
-def get_spreadsheet():
-    client = get_client()
-    return client.open_by_key(SPREADSHEET_ID)
 
 
 def get_or_create_sheet(spreadsheet, title, rows=500, cols=80):
@@ -100,7 +126,7 @@ def all_sundays_for_year(year):
 
 
 def display_date(d):
-    return d.strftime("%-d %b")
+    return d.strftime("%d %b").lstrip("0")
 
 
 def parse_schedule_date(value, fallback_year):
@@ -118,10 +144,11 @@ def parse_schedule_date(value, fallback_year):
     month_text = match.group(2)[:3].title()
 
     try:
-        return datetime.strptime(
+        parsed = datetime.strptime(
             f"{day} {month_text} {fallback_year}",
             "%d %b %Y"
         ).date()
+        return parsed
     except ValueError:
         return None
 
@@ -135,20 +162,11 @@ def clean_name(value):
         return ""
 
     value = str(value).strip()
-
-    if not value:
-        return ""
-
     value = value.replace("\n", " ")
     value = re.sub(r"\s+", " ", value)
 
-    # Remove notes like (N)
     value = re.sub(r"\([^)]*\)", "", value).strip()
-
-    # Remove O: notes
     value = re.sub(r"\bO:\s*", "", value).strip()
-
-    # Remove A: notes but keep the actual name after it
     value = value.replace("A:", "").strip()
 
     return value
@@ -160,7 +178,6 @@ def split_names(cell_value):
 
     text = str(cell_value).strip()
 
-    # Split common separators used in your sheet
     parts = re.split(r";|,|&|\band\b", text)
 
     names = []
@@ -171,38 +188,13 @@ def split_names(cell_value):
         if not name:
             continue
 
-        if name.lower() in {w.lower() for w in IGNORE_WORDS}:
-            continue
-
         if len(name) < 3:
             continue
 
-        # Ignore headings/roles
-        role_words = [
-            "leader",
-            "director",
-            "assistant",
-            "runner",
-            "greeter",
-            "wiggle",
-            "hall",
-            "sound",
-            "lights",
-            "offering",
-            "announcements",
-            "store",
-            "prep",
-            "outside",
-            "inside",
-            "babies",
-            "age",
-            "uGroup",
-            "uKids",
-            "pre-school",
-            "elementary",
-        ]
+        if name.lower() in IGNORE_WORDS:
+            continue
 
-        if any(word.lower() in name.lower() for word in role_words):
+        if any(word.lower() in name.lower() for word in ROLE_WORDS):
             continue
 
         names.append(name)
@@ -211,7 +203,7 @@ def split_names(cell_value):
 
 
 # =========================
-# READ SCHEDULE OUTPUT
+# READ ROSTER SHEET
 # =========================
 
 def extract_serving_from_schedule_tab(ws, year):
@@ -229,18 +221,18 @@ def extract_serving_from_schedule_tab(ws, year):
             if not possible_date:
                 continue
 
-            # Only use Sundays in the selected year
-            if possible_date.year != year or possible_date.weekday() != 6:
+            if possible_date.year != year:
                 continue
 
-            # Look down this date column until the next date/header section
+            if possible_date.weekday() != 6:
+                continue
+
             for r in range(row_idx + 1, len(values)):
                 if col_idx >= len(values[r]):
                     continue
 
                 value = values[r][col_idx]
 
-                # Stop if another date appears in the same column lower down
                 if parse_schedule_date(value, year):
                     break
 
@@ -256,16 +248,15 @@ def extract_serving_from_schedule_tab(ws, year):
     return found
 
 
-def collect_all_serving_data(spreadsheet):
+def collect_all_serving_data(roster_spreadsheet):
     all_records = []
-
-    existing_tabs = [ws.title for ws in spreadsheet.worksheets()]
+    existing_tabs = [ws.title for ws in roster_spreadsheet.worksheets()]
 
     for tab_name in SCHEDULE_TABS:
         if tab_name not in existing_tabs:
             continue
 
-        ws = spreadsheet.worksheet(tab_name)
+        ws = roster_spreadsheet.worksheet(tab_name)
         records = extract_serving_from_schedule_tab(ws, YEAR)
         all_records.extend(records)
 
@@ -302,7 +293,7 @@ def build_review_dataframe(serving_df):
 
 
 # =========================
-# BUILD STATS TAB
+# BUILD STATISTICS TAB
 # =========================
 
 def build_statistics_dataframe(review_df):
@@ -323,26 +314,18 @@ def build_statistics_dataframe(review_df):
         total_serves = len(served_dates)
         last_served = max(served_dates) if served_dates else ""
 
-        current_streak = 0
         max_streak = 0
         temp_streak = 0
-        previous_served = False
 
-        for d, header in zip(sundays, date_headers):
-            served = d in served_dates
-
-            if served:
-                if previous_served:
-                    temp_streak += 1
-                else:
-                    temp_streak = 1
+        for d in sundays:
+            if d in served_dates:
+                temp_streak += 1
                 max_streak = max(max_streak, temp_streak)
             else:
                 temp_streak = 0
 
-            previous_served = served
+        current_streak = 0
 
-        # Current streak from the latest Sunday backwards
         for d in reversed(sundays):
             if d in served_dates:
                 current_streak += 1
@@ -367,13 +350,18 @@ def build_statistics_dataframe(review_df):
         })
 
     stats = pd.DataFrame(rows)
-    stats = stats.sort_values(["Total Serves", "Name"], ascending=[False, True])
+
+    if not stats.empty:
+        stats = stats.sort_values(
+            ["Total Serves", "Name"],
+            ascending=[False, True]
+        )
 
     return stats
 
 
 # =========================
-# WRITE TO GOOGLE SHEETS
+# WRITE TO REVIEW SHEET
 # =========================
 
 def write_dataframe_to_sheet(ws, df):
@@ -381,16 +369,17 @@ def write_dataframe_to_sheet(ws, df):
 
     values = [df.columns.tolist()] + df.astype(str).values.tolist()
 
-    if values:
-        ws.update(values, "A1")
-
+    ws.update(values, "A1")
     ws.freeze(rows=1, cols=1)
 
 
 def update_review_and_stats():
-    spreadsheet = get_spreadsheet()
+    client = get_client()
 
-    serving_df = collect_all_serving_data(spreadsheet)
+    roster_spreadsheet = client.open_by_key(ROSTER_SPREADSHEET_ID)
+    review_spreadsheet = client.open_by_key(REVIEW_SPREADSHEET_ID)
+
+    serving_df = collect_all_serving_data(roster_spreadsheet)
 
     if serving_df.empty:
         return None, None, None
@@ -398,8 +387,19 @@ def update_review_and_stats():
     review_df = build_review_dataframe(serving_df)
     stats_df = build_statistics_dataframe(review_df)
 
-    review_ws = get_or_create_sheet(spreadsheet, REVIEW_TAB, rows=500, cols=80)
-    stats_ws = get_or_create_sheet(spreadsheet, STATS_TAB, rows=500, cols=20)
+    review_ws = get_or_create_sheet(
+        review_spreadsheet,
+        REVIEW_TAB,
+        rows=500,
+        cols=80
+    )
+
+    stats_ws = get_or_create_sheet(
+        review_spreadsheet,
+        STATS_TAB,
+        rows=500,
+        cols=20
+    )
 
     write_dataframe_to_sheet(review_ws, review_df)
     write_dataframe_to_sheet(stats_ws, stats_df)
@@ -408,7 +408,7 @@ def update_review_and_stats():
 
 
 # =========================
-# STREAMLIT UI
+# STREAMLIT APP
 # =========================
 
 st.set_page_config(
@@ -417,24 +417,30 @@ st.set_page_config(
 )
 
 st.title("uKids Serving Review")
-st.caption("Creates yearly serving history and serving statistics from the monthly uKids schedule tabs.")
 
 st.info(
-    "This app writes `1` under each Sunday where a serving girl served. "
-    "The availability app can then read this tab and block dates that would create 3 weekends in a row."
+    "This app reads the roster from one Google Sheet and writes the serving review "
+    "to another Google Sheet. A `1` means the serving girl served on that Sunday."
 )
 
-with st.expander("Tabs this app will read"):
+with st.expander("Roster tabs this app will read"):
     st.write(SCHEDULE_TABS)
 
+st.write("Review tabs that will be created/updated:")
+st.write(f"- `{REVIEW_TAB}`")
+st.write(f"- `{STATS_TAB}`")
+
 if st.button("Update Serving Review", type="primary"):
-    with st.spinner("Reading schedule tabs and updating review sheets..."):
+    with st.spinner("Reading roster and updating serving review..."):
         serving_df, review_df, stats_df = update_review_and_stats()
 
     if serving_df is None:
-        st.error("No serving data was found. Check that the schedule tab names match the names in the code.")
+        st.error(
+            "No serving data was found. Please check that your roster tab names "
+            "match the names listed in the code."
+        )
     else:
-        st.success("Serving Review and Serving Statistics tabs updated successfully.")
+        st.success("Serving Review and Serving Statistics updated successfully.")
 
         st.subheader("Serving Records Found")
         st.dataframe(serving_df, use_container_width=True)
@@ -446,4 +452,4 @@ if st.button("Update Serving Review", type="primary"):
         st.dataframe(stats_df, use_container_width=True)
 
 else:
-    st.write("Click **Update Serving Review** to scan the schedule and update the two review tabs.")
+    st.write("Click **Update Serving Review** to update the review tabs.")
