@@ -19,6 +19,9 @@ REVIEW_SPREADSHEET_ID = st.secrets["google"]["review_spreadsheet_id"]
 REVIEW_TAB = f"Serving Review {YEAR}"
 STATS_TAB = "Serving Statistics"
 
+SERVING_BASE_TAB = "uKids Girls SB"
+SERVING_BASE_NAME_COLUMN = "Name"
+
 SCHEDULE_TABS = [
     "January 2026",
     "February 2026",
@@ -144,11 +147,10 @@ def parse_schedule_date(value, fallback_year):
     month_text = match.group(2)[:3].title()
 
     try:
-        parsed = datetime.strptime(
+        return datetime.strptime(
             f"{day} {month_text} {fallback_year}",
             "%d %b %Y"
         ).date()
-        return parsed
     except ValueError:
         return None
 
@@ -170,6 +172,10 @@ def clean_name(value):
     value = value.replace("A:", "").strip()
 
     return value
+
+
+def normalize_name(value):
+    return clean_name(value).lower()
 
 
 def split_names(cell_value):
@@ -200,6 +206,31 @@ def split_names(cell_value):
         names.append(name)
 
     return names
+
+
+# =========================
+# SERVING BASE
+# =========================
+
+def get_serving_base_names(roster_spreadsheet):
+    try:
+        ws = roster_spreadsheet.worksheet(SERVING_BASE_TAB)
+    except gspread.WorksheetNotFound:
+        st.error(f"Serving base tab not found: {SERVING_BASE_TAB}")
+        return {}
+
+    rows = ws.get_all_records()
+
+    serving_base = {}
+
+    for row in rows:
+        raw_name = row.get(SERVING_BASE_NAME_COLUMN, "")
+        name = clean_name(raw_name)
+
+        if name:
+            serving_base[normalize_name(name)] = name
+
+    return serving_base
 
 
 # =========================
@@ -250,7 +281,12 @@ def extract_serving_from_schedule_tab(ws, year):
 
 def collect_all_serving_data(roster_spreadsheet):
     all_records = []
+
     existing_tabs = [ws.title for ws in roster_spreadsheet.worksheets()]
+    serving_base = get_serving_base_names(roster_spreadsheet)
+
+    if not serving_base:
+        return pd.DataFrame(columns=["Name", "Date", "Source Tab"])
 
     for tab_name in SCHEDULE_TABS:
         if tab_name not in existing_tabs:
@@ -258,7 +294,16 @@ def collect_all_serving_data(roster_spreadsheet):
 
         ws = roster_spreadsheet.worksheet(tab_name)
         records = extract_serving_from_schedule_tab(ws, YEAR)
-        all_records.extend(records)
+
+        for record in records:
+            normalized = normalize_name(record["Name"])
+
+            if normalized in serving_base:
+                all_records.append({
+                    "Name": serving_base[normalized],
+                    "Date": record["Date"],
+                    "Source Tab": record["Source Tab"],
+                })
 
     df = pd.DataFrame(all_records)
 
@@ -419,9 +464,13 @@ st.set_page_config(
 st.title("uKids Serving Review")
 
 st.info(
-    "This app reads the roster from one Google Sheet and writes the serving review "
-    "to another Google Sheet. A `1` means the serving girl served on that Sunday."
+    "This app reads the roster from one Google Sheet, compares names to the serving base, "
+    "and writes only valid serving girls to the review sheet. A `1` means she served on that Sunday."
 )
+
+st.write("Serving base used:")
+st.write(f"- `{SERVING_BASE_TAB}`")
+st.write(f"- Name column: `{SERVING_BASE_NAME_COLUMN}`")
 
 with st.expander("Roster tabs this app will read"):
     st.write(SCHEDULE_TABS)
@@ -431,13 +480,13 @@ st.write(f"- `{REVIEW_TAB}`")
 st.write(f"- `{STATS_TAB}`")
 
 if st.button("Update Serving Review", type="primary"):
-    with st.spinner("Reading roster and updating serving review..."):
+    with st.spinner("Reading roster, checking serving base, and updating review..."):
         serving_df, review_df, stats_df = update_review_and_stats()
 
     if serving_df is None:
         st.error(
-            "No serving data was found. Please check that your roster tab names "
-            "match the names listed in the code."
+            "No serving data was found. Check your schedule tab names, serving base tab name, "
+            "and serving base name column."
         )
     else:
         st.success("Serving Review and Serving Statistics updated successfully.")
