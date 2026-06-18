@@ -16,11 +16,17 @@ YEAR = 2026
 ROSTER_SPREADSHEET_ID = st.secrets["google"]["roster_spreadsheet_id"]
 REVIEW_SPREADSHEET_ID = st.secrets["google"]["review_spreadsheet_id"]
 
-REVIEW_TAB = f"Serving Review {YEAR}"
-STATS_TAB = "Serving Statistics"
-
 SERVING_BASE_TAB = "ServingBase"
 SERVING_BASE_NAME_COLUMN = "Serving Girl"
+
+COUNTING_RULES_TAB = "Counting Rules"
+COUNTING_ERRORS_TAB = "Counting Errors"
+
+COUNTING_RULE_POSITION_COLUMN = "Position"
+COUNTING_RULE_COUNTS_COLUMN = "Counts As Serving"
+
+REVIEW_TAB = f"Serving Review {YEAR}"
+STATS_TAB = "Serving Statistics"
 
 SCHEDULE_TABS = [
     "January 2026",
@@ -36,6 +42,10 @@ SCHEDULE_TABS = [
     "November 2026",
     "December 2026",
 ]
+
+YES_VALUES = {"yes", "y", "true", "1"}
+NO_VALUES = {"no", "n", "false", "0"}
+
 
 # =========================
 # GOOGLE CONNECTION
@@ -60,6 +70,56 @@ def get_or_create_sheet(spreadsheet, title, rows=1000, cols=80):
         return spreadsheet.worksheet(title)
     except gspread.WorksheetNotFound:
         return spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
+
+
+# =========================
+# HELPERS
+# =========================
+
+def clean_text(value):
+    if value is None:
+        return ""
+
+    value = str(value).strip()
+    value = value.replace("\n", " ")
+    value = re.sub(r"\s+", " ", value)
+    return value
+
+
+def clean_name(value):
+    value = clean_text(value)
+
+    value = re.sub(r"\([^)]*\)", "", value).strip()
+    value = re.sub(r"\bO:\s*", "", value).strip()
+    value = value.replace("A:", "").strip()
+
+    return value
+
+
+def normalize(value):
+    return clean_text(value).lower()
+
+
+def normalize_name(value):
+    return clean_name(value).lower()
+
+
+def split_names(cell_value):
+    if not cell_value:
+        return []
+
+    text = str(cell_value).strip()
+    parts = re.split(r";|,|&|\band\b", text)
+
+    names = []
+
+    for part in parts:
+        name = clean_name(part)
+
+        if name and len(name) >= 3:
+            names.append(name)
+
+    return names
 
 
 # =========================
@@ -100,68 +160,20 @@ def parse_schedule_date(value, fallback_year):
     month_text = match.group(2)[:3].title()
 
     try:
-        parsed = datetime.strptime(
+        return datetime.strptime(
             f"{day} {month_text} {fallback_year}",
             "%d %b %Y"
         ).date()
-        return parsed
     except ValueError:
         return None
-
-
-# =========================
-# NAME CLEANING
-# =========================
-
-def clean_name(value):
-    if value is None:
-        return ""
-
-    value = str(value).strip()
-    value = value.replace("\n", " ")
-    value = re.sub(r"\s+", " ", value)
-
-    value = re.sub(r"\([^)]*\)", "", value).strip()
-    value = re.sub(r"\bO:\s*", "", value).strip()
-    value = value.replace("A:", "").strip()
-
-    return value
-
-
-def normalize_name(value):
-    return clean_name(value).lower()
-
-
-def split_names(cell_value):
-    if not cell_value:
-        return []
-
-    text = str(cell_value).strip()
-
-    parts = re.split(r";|,|&|\band\b", text)
-
-    names = []
-
-    for part in parts:
-        name = clean_name(part)
-
-        if name and len(name) >= 3:
-            names.append(name)
-
-    return names
 
 
 # =========================
 # SERVING BASE
 # =========================
 
-def get_serving_base_names(spreadsheet):
-    try:
-        ws = spreadsheet.worksheet(SERVING_BASE_TAB)
-    except gspread.WorksheetNotFound:
-        st.error(f"Could not find serving base tab: {SERVING_BASE_TAB}")
-        return {}
-
+def get_serving_base_names(review_spreadsheet):
+    ws = review_spreadsheet.worksheet(SERVING_BASE_TAB)
     rows = ws.get_all_records()
 
     serving_base = {}
@@ -176,8 +188,124 @@ def get_serving_base_names(spreadsheet):
 
 
 # =========================
-# READ ROSTER
+# COUNTING RULES
 # =========================
+
+def setup_counting_rules_sheet(review_spreadsheet):
+    ws = get_or_create_sheet(
+        review_spreadsheet,
+        COUNTING_RULES_TAB,
+        rows=300,
+        cols=5,
+    )
+
+    values = ws.get_all_values()
+
+    if not values:
+        starter = [
+            [COUNTING_RULE_POSITION_COLUMN, COUNTING_RULE_COUNTS_COLUMN],
+            ["Age 1", "Yes"],
+            ["Age 2", "Yes"],
+            ["Age 3", "Yes"],
+            ["Age 4", "Yes"],
+            ["Age 5", "Yes"],
+            ["Age 6", "Yes"],
+            ["Age 7", "Yes"],
+            ["Age 8", "Yes"],
+            ["Babies Leader Age 1", "Yes"],
+            ["Babies Leader Age 2", "Yes"],
+            ["Pre-School Leader Age 3", "Yes"],
+            ["Pre-School Leader Age 4", "Yes"],
+            ["Pre-School Leader Age 5", "Yes"],
+            ["Elementary Leader Age 6", "Yes"],
+            ["Elementary Leader Age 7", "Yes"],
+            ["Elementary Leader Age 8", "Yes"],
+            ["uGroup Age 9", "Yes"],
+            ["uGroup Age 10", "Yes"],
+            ["uGroup Age 11", "Yes"],
+            ["Special Needs", "Yes"],
+            ["Main Director", "No"],
+            ["Director Roaming Inside", "No"],
+            ["Oversight", "No"],
+        ]
+
+        ws.update(starter, "A1")
+
+    return ws
+
+
+def get_counting_rules(review_spreadsheet):
+    setup_counting_rules_sheet(review_spreadsheet)
+
+    ws = review_spreadsheet.worksheet(COUNTING_RULES_TAB)
+    rows = ws.get_all_records()
+
+    rules = {}
+
+    for row in rows:
+        position = clean_text(row.get(COUNTING_RULE_POSITION_COLUMN, ""))
+        counts_value = clean_text(row.get(COUNTING_RULE_COUNTS_COLUMN, ""))
+
+        if not position:
+            continue
+
+        value = normalize(counts_value)
+
+        if value in YES_VALUES:
+            rules[normalize(position)] = True
+        elif value in NO_VALUES:
+            rules[normalize(position)] = False
+
+    return rules
+
+
+def position_counts(position, rules):
+    position_norm = normalize(position)
+
+    if not position_norm:
+        return None
+
+    # Exact match first
+    if position_norm in rules:
+        return rules[position_norm]
+
+    # Then contains-match
+    for rule_position, counts in rules.items():
+        if rule_position and rule_position in position_norm:
+            return counts
+
+    return None
+
+
+# =========================
+# EXTRACT ROSTER
+# =========================
+
+def find_person_columns(values, header_row_idx, date_col_idx):
+    row = values[header_row_idx]
+    next_row = values[header_row_idx + 1] if header_row_idx + 1 < len(values) else []
+
+    # If the next row says Morning/Evening, people are usually in the next columns.
+    person_cols = []
+
+    for c in range(date_col_idx + 1, len(row)):
+        cell_same_row = clean_text(row[c]) if c < len(row) else ""
+
+        if parse_schedule_date(cell_same_row, YEAR):
+            break
+
+        next_cell = clean_text(next_row[c]) if c < len(next_row) else ""
+
+        if normalize(next_cell) in {"morning", "evening"}:
+            person_cols.append(c)
+
+    if person_cols:
+        return person_cols, date_col_idx
+
+    # Otherwise, the date column itself contains the names and the role is to the left.
+    role_col = max(0, date_col_idx - 1)
+    return [date_col_idx], role_col
+
 
 def extract_serving_from_schedule_tab(ws, year):
     values = ws.get_all_values()
@@ -189,46 +317,61 @@ def extract_serving_from_schedule_tab(ws, year):
 
     for row_idx, row in enumerate(values):
         for col_idx, cell in enumerate(row):
-            possible_date = parse_schedule_date(cell, year)
+            service_date = parse_schedule_date(cell, year)
 
-            if not possible_date:
+            if not service_date:
                 continue
 
-            if possible_date.year != year:
+            if service_date.year != year:
                 continue
 
-            if possible_date.weekday() != 6:
+            if service_date.weekday() != 6:
                 continue
+
+            person_cols, role_col = find_person_columns(values, row_idx, col_idx)
 
             for r in range(row_idx + 1, len(values)):
-                if col_idx >= len(values[r]):
+                if role_col >= len(values[r]):
                     continue
 
-                value = values[r][col_idx]
+                position = clean_text(values[r][role_col])
 
-                # Stop when another date heading appears in the same column
-                if parse_schedule_date(value, year):
+                # Stop when a new date/header starts in the role column
+                if parse_schedule_date(position, year):
                     break
 
-                names = split_names(value)
+                if not position:
+                    continue
 
-                for name in names:
-                    found.append({
-                        "Name": name,
-                        "Date": possible_date,
-                        "Source Tab": ws.title,
-                    })
+                for person_col in person_cols:
+                    if person_col >= len(values[r]):
+                        continue
+
+                    cell_value = values[r][person_col]
+
+                    # Avoid treating new date headings as names
+                    if parse_schedule_date(cell_value, year):
+                        continue
+
+                    names = split_names(cell_value)
+
+                    for name in names:
+                        found.append({
+                            "Name": name,
+                            "Date": service_date,
+                            "Position": position,
+                            "Source Tab": ws.title,
+                        })
 
     return found
 
 
 def collect_all_serving_data(roster_spreadsheet, review_spreadsheet):
-    all_records = []
-
     serving_base = get_serving_base_names(review_spreadsheet)
+    counting_rules = get_counting_rules(review_spreadsheet)
 
-    if not serving_base:
-        return pd.DataFrame(columns=["Name", "Date", "Source Tab"])
+    all_records = []
+    counting_errors = []
 
     existing_tabs = [ws.title for ws in roster_spreadsheet.worksheets()]
 
@@ -240,28 +383,56 @@ def collect_all_serving_data(roster_spreadsheet, review_spreadsheet):
         records = extract_serving_from_schedule_tab(ws, YEAR)
 
         for record in records:
-            normalized = normalize_name(record["Name"])
+            normalized_name = normalize_name(record["Name"])
 
-            if normalized in serving_base:
-                all_records.append({
-                    "Name": serving_base[normalized],
-                    "Date": record["Date"],
-                    "Source Tab": record["Source Tab"],
+            if normalized_name not in serving_base:
+                continue
+
+            count_result = position_counts(record["Position"], counting_rules)
+
+            if count_result is None:
+                counting_errors.append({
+                    "Position": record["Position"],
+                    "First Found In": record["Source Tab"],
+                    "Date": display_date(record["Date"]),
+                    "Example Name": serving_base[normalized_name],
+                    "Status": "Counting Error",
                 })
+                continue
 
-    df = pd.DataFrame(all_records)
+            if count_result is False:
+                continue
 
-    if df.empty:
-        return pd.DataFrame(columns=["Name", "Date", "Source Tab"])
+            all_records.append({
+                "Name": serving_base[normalized_name],
+                "Date": record["Date"],
+                "Position": record["Position"],
+                "Source Tab": record["Source Tab"],
+            })
 
-    df = df.drop_duplicates(subset=["Name", "Date"])
-    df = df.sort_values(["Name", "Date"])
+    serving_df = pd.DataFrame(all_records)
 
-    return df
+    if serving_df.empty:
+        serving_df = pd.DataFrame(columns=["Name", "Date", "Position", "Source Tab"])
+    else:
+        serving_df = serving_df.drop_duplicates(subset=["Name", "Date", "Position"])
+        serving_df = serving_df.sort_values(["Name", "Date", "Position"])
+
+    errors_df = pd.DataFrame(counting_errors)
+
+    if errors_df.empty:
+        errors_df = pd.DataFrame(
+            columns=["Position", "First Found In", "Date", "Example Name", "Status"]
+        )
+    else:
+        errors_df = errors_df.drop_duplicates(subset=["Position"])
+        errors_df = errors_df.sort_values(["Position"])
+
+    return serving_df, errors_df
 
 
 # =========================
-# BUILD REVIEW TAB
+# BUILD REVIEW
 # =========================
 
 def build_review_dataframe(serving_df, review_spreadsheet):
@@ -282,10 +453,6 @@ def build_review_dataframe(serving_df, review_spreadsheet):
 
     return review
 
-
-# =========================
-# BUILD STATS TAB
-# =========================
 
 def build_statistics_dataframe(review_df):
     sundays = all_sundays_for_year(YEAR)
@@ -352,7 +519,7 @@ def build_statistics_dataframe(review_df):
 
 
 # =========================
-# WRITE TO GOOGLE SHEET
+# WRITE SHEETS
 # =========================
 
 def write_dataframe_to_sheet(ws, df):
@@ -370,16 +537,24 @@ def update_review_and_stats():
     roster_spreadsheet = client.open_by_key(ROSTER_SPREADSHEET_ID)
     review_spreadsheet = client.open_by_key(REVIEW_SPREADSHEET_ID)
 
-    serving_df = collect_all_serving_data(
+    serving_df, errors_df = collect_all_serving_data(
         roster_spreadsheet,
         review_spreadsheet,
     )
 
-    review_df = build_review_dataframe(
-        serving_df,
+    errors_ws = get_or_create_sheet(
         review_spreadsheet,
+        COUNTING_ERRORS_TAB,
+        rows=1000,
+        cols=10,
     )
 
+    write_dataframe_to_sheet(errors_ws, errors_df)
+
+    if not errors_df.empty:
+        return serving_df, None, None, errors_df
+
+    review_df = build_review_dataframe(serving_df, review_spreadsheet)
     stats_df = build_statistics_dataframe(review_df)
 
     review_ws = get_or_create_sheet(
@@ -399,7 +574,7 @@ def update_review_and_stats():
     write_dataframe_to_sheet(review_ws, review_df)
     write_dataframe_to_sheet(stats_ws, stats_df)
 
-    return serving_df, review_df, stats_df
+    return serving_df, review_df, stats_df, errors_df
 
 
 # =========================
@@ -414,29 +589,38 @@ st.set_page_config(
 st.title("uKids Serving Review")
 
 st.info(
-    "This app reads the roster, compares all names to the ServingBase tab, "
-    "and only writes serving girls listed under the `Serving Girl` column. "
-    "A `1` means she served on that Sunday."
+    "This app reads the roster, checks names against ServingBase, "
+    "then checks each position against Counting Rules. "
+    "If a position is not found in Counting Rules, it is written to Counting Errors and the review is not updated."
 )
 
-st.write("Serving base settings:")
-st.write(f"- Tab: `{SERVING_BASE_TAB}`")
-st.write(f"- Name column: `{SERVING_BASE_NAME_COLUMN}`")
+st.write("Required tabs in the review spreadsheet:")
+st.write(f"- `{SERVING_BASE_TAB}`")
+st.write(f"- `{COUNTING_RULES_TAB}`")
+st.write(f"- `{COUNTING_ERRORS_TAB}`")
+st.write(f"- `{REVIEW_TAB}`")
+st.write(f"- `{STATS_TAB}`")
 
 with st.expander("Roster tabs this app will read"):
     st.write(SCHEDULE_TABS)
 
-st.write("Review tabs that will be created/updated:")
-st.write(f"- `{REVIEW_TAB}`")
-st.write(f"- `{STATS_TAB}`")
-
 if st.button("Update Serving Review", type="primary"):
-    with st.spinner("Reading roster and updating serving review..."):
-        serving_df, review_df, stats_df = update_review_and_stats()
+    with st.spinner("Reading roster and checking counting rules..."):
+        serving_df, review_df, stats_df, errors_df = update_review_and_stats()
+
+    if not errors_df.empty:
+        st.error(
+            "Counting errors found. Add these positions to the Counting Rules tab, then run the app again."
+        )
+
+        st.subheader("Counting Errors")
+        st.dataframe(errors_df, use_container_width=True)
+
+        st.stop()
 
     st.success("Serving Review and Serving Statistics updated successfully.")
 
-    st.subheader("Serving Records Found")
+    st.subheader("Serving Records Counted")
     st.dataframe(serving_df, use_container_width=True)
 
     st.subheader(REVIEW_TAB)
