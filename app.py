@@ -19,8 +19,8 @@ REVIEW_SPREADSHEET_ID = st.secrets["google"]["review_spreadsheet_id"]
 REVIEW_TAB = f"Serving Review {YEAR}"
 STATS_TAB = "Serving Statistics"
 
-SERVING_BASE_TAB = "uKids Girls SB"
-SERVING_BASE_NAME_COLUMN = "Name"
+SERVING_BASE_TAB = "ServingBase"
+SERVING_BASE_NAME_COLUMN = "Serving Girl"
 
 SCHEDULE_TABS = [
     "January 2026",
@@ -36,53 +36,6 @@ SCHEDULE_TABS = [
     "November 2026",
     "December 2026",
 ]
-
-IGNORE_WORDS = {
-    "",
-    "x",
-    "morning",
-    "evening",
-    "director",
-    "main director",
-    "oversight",
-    "special needs",
-    "ukids",
-    "ugroup",
-    "babies",
-    "age 1",
-    "age 2",
-    "age 3",
-    "age 4",
-    "age 5",
-    "age 6",
-    "age 7",
-    "age 8",
-}
-
-ROLE_WORDS = [
-    "leader",
-    "director",
-    "assistant",
-    "runner",
-    "greeter",
-    "wiggle",
-    "hall",
-    "sound",
-    "lights",
-    "offering",
-    "announcements",
-    "store",
-    "prep",
-    "outside",
-    "inside",
-    "babies",
-    "age",
-    "ugroup",
-    "ukids",
-    "pre-school",
-    "elementary",
-]
-
 
 # =========================
 # GOOGLE CONNECTION
@@ -102,7 +55,7 @@ def get_client():
     return gspread.authorize(credentials)
 
 
-def get_or_create_sheet(spreadsheet, title, rows=500, cols=80):
+def get_or_create_sheet(spreadsheet, title, rows=1000, cols=80):
     try:
         return spreadsheet.worksheet(title)
     except gspread.WorksheetNotFound:
@@ -147,10 +100,11 @@ def parse_schedule_date(value, fallback_year):
     month_text = match.group(2)[:3].title()
 
     try:
-        return datetime.strptime(
+        parsed = datetime.strptime(
             f"{day} {month_text} {fallback_year}",
             "%d %b %Y"
         ).date()
+        return parsed
     except ValueError:
         return None
 
@@ -191,19 +145,8 @@ def split_names(cell_value):
     for part in parts:
         name = clean_name(part)
 
-        if not name:
-            continue
-
-        if len(name) < 3:
-            continue
-
-        if name.lower() in IGNORE_WORDS:
-            continue
-
-        if any(word.lower() in name.lower() for word in ROLE_WORDS):
-            continue
-
-        names.append(name)
+        if name and len(name) >= 3:
+            names.append(name)
 
     return names
 
@@ -212,11 +155,11 @@ def split_names(cell_value):
 # SERVING BASE
 # =========================
 
-def get_serving_base_names(roster_spreadsheet):
+def get_serving_base_names(spreadsheet):
     try:
-        ws = roster_spreadsheet.worksheet(SERVING_BASE_TAB)
+        ws = spreadsheet.worksheet(SERVING_BASE_TAB)
     except gspread.WorksheetNotFound:
-        st.error(f"Serving base tab not found: {SERVING_BASE_TAB}")
+        st.error(f"Could not find serving base tab: {SERVING_BASE_TAB}")
         return {}
 
     rows = ws.get_all_records()
@@ -224,8 +167,7 @@ def get_serving_base_names(roster_spreadsheet):
     serving_base = {}
 
     for row in rows:
-        raw_name = row.get(SERVING_BASE_NAME_COLUMN, "")
-        name = clean_name(raw_name)
+        name = clean_name(row.get(SERVING_BASE_NAME_COLUMN, ""))
 
         if name:
             serving_base[normalize_name(name)] = name
@@ -234,7 +176,7 @@ def get_serving_base_names(roster_spreadsheet):
 
 
 # =========================
-# READ ROSTER SHEET
+# READ ROSTER
 # =========================
 
 def extract_serving_from_schedule_tab(ws, year):
@@ -264,6 +206,7 @@ def extract_serving_from_schedule_tab(ws, year):
 
                 value = values[r][col_idx]
 
+                # Stop when another date heading appears in the same column
                 if parse_schedule_date(value, year):
                     break
 
@@ -279,14 +222,15 @@ def extract_serving_from_schedule_tab(ws, year):
     return found
 
 
-def collect_all_serving_data(roster_spreadsheet):
+def collect_all_serving_data(roster_spreadsheet, review_spreadsheet):
     all_records = []
 
-    existing_tabs = [ws.title for ws in roster_spreadsheet.worksheets()]
-    serving_base = get_serving_base_names(roster_spreadsheet)
+    serving_base = get_serving_base_names(review_spreadsheet)
 
     if not serving_base:
         return pd.DataFrame(columns=["Name", "Date", "Source Tab"])
+
+    existing_tabs = [ws.title for ws in roster_spreadsheet.worksheets()]
 
     for tab_name in SCHEDULE_TABS:
         if tab_name not in existing_tabs:
@@ -320,16 +264,18 @@ def collect_all_serving_data(roster_spreadsheet):
 # BUILD REVIEW TAB
 # =========================
 
-def build_review_dataframe(serving_df):
+def build_review_dataframe(serving_df, review_spreadsheet):
     sundays = all_sundays_for_year(YEAR)
     date_headers = [display_date(d) for d in sundays]
 
-    names = sorted(serving_df["Name"].dropna().unique())
+    serving_base = get_serving_base_names(review_spreadsheet)
+    names = sorted(serving_base.values())
 
     review = pd.DataFrame({"Name": names})
 
     for d, header in zip(sundays, date_headers):
         served_names = set(serving_df.loc[serving_df["Date"] == d, "Name"])
+
         review[header] = review["Name"].apply(
             lambda name: 1 if name in served_names else ""
         )
@@ -338,7 +284,7 @@ def build_review_dataframe(serving_df):
 
 
 # =========================
-# BUILD STATISTICS TAB
+# BUILD STATS TAB
 # =========================
 
 def build_statistics_dataframe(review_df):
@@ -406,7 +352,7 @@ def build_statistics_dataframe(review_df):
 
 
 # =========================
-# WRITE TO REVIEW SHEET
+# WRITE TO GOOGLE SHEET
 # =========================
 
 def write_dataframe_to_sheet(ws, df):
@@ -424,26 +370,30 @@ def update_review_and_stats():
     roster_spreadsheet = client.open_by_key(ROSTER_SPREADSHEET_ID)
     review_spreadsheet = client.open_by_key(REVIEW_SPREADSHEET_ID)
 
-    serving_df = collect_all_serving_data(roster_spreadsheet)
+    serving_df = collect_all_serving_data(
+        roster_spreadsheet,
+        review_spreadsheet,
+    )
 
-    if serving_df.empty:
-        return None, None, None
+    review_df = build_review_dataframe(
+        serving_df,
+        review_spreadsheet,
+    )
 
-    review_df = build_review_dataframe(serving_df)
     stats_df = build_statistics_dataframe(review_df)
 
     review_ws = get_or_create_sheet(
         review_spreadsheet,
         REVIEW_TAB,
-        rows=500,
-        cols=80
+        rows=1000,
+        cols=80,
     )
 
     stats_ws = get_or_create_sheet(
         review_spreadsheet,
         STATS_TAB,
-        rows=500,
-        cols=20
+        rows=1000,
+        cols=20,
     )
 
     write_dataframe_to_sheet(review_ws, review_df)
@@ -464,12 +414,13 @@ st.set_page_config(
 st.title("uKids Serving Review")
 
 st.info(
-    "This app reads the roster from one Google Sheet, compares names to the serving base, "
-    "and writes only valid serving girls to the review sheet. A `1` means she served on that Sunday."
+    "This app reads the roster, compares all names to the ServingBase tab, "
+    "and only writes serving girls listed under the `Serving Girl` column. "
+    "A `1` means she served on that Sunday."
 )
 
-st.write("Serving base used:")
-st.write(f"- `{SERVING_BASE_TAB}`")
+st.write("Serving base settings:")
+st.write(f"- Tab: `{SERVING_BASE_TAB}`")
 st.write(f"- Name column: `{SERVING_BASE_NAME_COLUMN}`")
 
 with st.expander("Roster tabs this app will read"):
@@ -480,25 +431,19 @@ st.write(f"- `{REVIEW_TAB}`")
 st.write(f"- `{STATS_TAB}`")
 
 if st.button("Update Serving Review", type="primary"):
-    with st.spinner("Reading roster, checking serving base, and updating review..."):
+    with st.spinner("Reading roster and updating serving review..."):
         serving_df, review_df, stats_df = update_review_and_stats()
 
-    if serving_df is None:
-        st.error(
-            "No serving data was found. Check your schedule tab names, serving base tab name, "
-            "and serving base name column."
-        )
-    else:
-        st.success("Serving Review and Serving Statistics updated successfully.")
+    st.success("Serving Review and Serving Statistics updated successfully.")
 
-        st.subheader("Serving Records Found")
-        st.dataframe(serving_df, use_container_width=True)
+    st.subheader("Serving Records Found")
+    st.dataframe(serving_df, use_container_width=True)
 
-        st.subheader(REVIEW_TAB)
-        st.dataframe(review_df, use_container_width=True)
+    st.subheader(REVIEW_TAB)
+    st.dataframe(review_df, use_container_width=True)
 
-        st.subheader(STATS_TAB)
-        st.dataframe(stats_df, use_container_width=True)
+    st.subheader(STATS_TAB)
+    st.dataframe(stats_df, use_container_width=True)
 
 else:
     st.write("Click **Update Serving Review** to update the review tabs.")
