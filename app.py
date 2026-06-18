@@ -83,6 +83,7 @@ def clean_text(value):
     value = str(value).strip()
     value = value.replace("\n", " ")
     value = re.sub(r"\s+", " ", value)
+
     return value
 
 
@@ -109,6 +110,7 @@ def split_names(cell_value):
         return []
 
     text = str(cell_value).strip()
+
     parts = re.split(r";|,|&|\band\b", text)
 
     names = []
@@ -204,29 +206,44 @@ def setup_counting_rules_sheet(review_spreadsheet):
     if not values:
         starter = [
             [COUNTING_RULE_POSITION_COLUMN, COUNTING_RULE_COUNTS_COLUMN],
-            ["Age 1", "Yes"],
-            ["Age 2", "Yes"],
-            ["Age 3", "Yes"],
-            ["Age 4", "Yes"],
-            ["Age 5", "Yes"],
-            ["Age 6", "Yes"],
-            ["Age 7", "Yes"],
-            ["Age 8", "Yes"],
+            ["Oversight", "Yes"],
+            ["Main Director", "Yes"],
             ["Babies Leader Age 1", "Yes"],
+            ["Age 1", "Yes"],
+            ["Age 1 Bags Girls", "Yes"],
+            ["Age 1 Bags Boys", "Yes"],
+            ["Age 1 Nappies", "Yes"],
             ["Babies Leader Age 2", "Yes"],
+            ["Age 2", "Yes"],
+            ["Age 2 Bags Girls", "Yes"],
+            ["Age 2 Bags Boys", "Yes"],
+            ["Age 2 Nappies", "Yes"],
             ["Pre-School Leader Age 3", "Yes"],
+            ["Age 3", "Yes"],
+            ["Age 3 Bags", "Yes"],
             ["Pre-School Leader Age 4", "Yes"],
+            ["Age 4", "Yes"],
             ["Pre-School Leader Age 5", "Yes"],
+            ["Age 5", "Yes"],
             ["Elementary Leader Age 6", "Yes"],
+            ["Age 6", "Yes"],
             ["Elementary Leader Age 7", "Yes"],
+            ["Age 7", "Yes"],
             ["Elementary Leader Age 8", "Yes"],
+            ["Age 8", "Yes"],
             ["uGroup Age 9", "Yes"],
+            ["Age 9", "Yes"],
             ["uGroup Age 10", "Yes"],
+            ["Age 10", "Yes"],
             ["uGroup Age 11", "Yes"],
+            ["Age 11", "Yes"],
             ["Special Needs", "Yes"],
-            ["Main Director", "No"],
-            ["Director Roaming Inside", "No"],
-            ["Oversight", "No"],
+            ["uGroup Boys Morning", "No"],
+            ["uGroup Boys Evening", "No"],
+            ["Director Roaming Inside Age 1-3", "No"],
+            ["Director Roaming Inside Age 4-6", "No"],
+            ["Director Roaming Inside Age 7-9", "No"],
+            ["Director Roaming Inside Age 10-SN", "No"],
         ]
 
         ws.update(starter, "A1")
@@ -265,13 +282,17 @@ def position_counts(position, rules):
     if not position_norm:
         return None
 
-    # Exact match first
     if position_norm in rules:
         return rules[position_norm]
 
-    # Then contains-match
     for rule_position, counts in rules.items():
-        if rule_position and rule_position in position_norm:
+        if not rule_position:
+            continue
+
+        if rule_position in position_norm:
+            return counts
+
+        if position_norm in rule_position:
             return counts
 
     return None
@@ -281,30 +302,41 @@ def position_counts(position, rules):
 # EXTRACT ROSTER
 # =========================
 
+def is_stop_row(position):
+    position_norm = normalize(position)
+
+    if not position_norm:
+        return False
+
+    stop_words = {
+        "morning",
+        "evening",
+        "brooklyn",
+        "tygerberg",
+        "nelspruit",
+        "polokwane",
+    }
+
+    return position_norm in stop_words
+
+
 def find_person_columns(values, header_row_idx, date_col_idx):
-    row = values[header_row_idx]
-    next_row = values[header_row_idx + 1] if header_row_idx + 1 < len(values) else []
+    """
+    Main roster layout:
+    Column A contains positions.
+    Date columns contain serving girls.
 
-    # If the next row says Morning/Evening, people are usually in the next columns.
-    person_cols = []
+    Example:
+    A = Position
+    B = 7 June
+    C = 14 June
+    D = 21 June
+    """
 
-    for c in range(date_col_idx + 1, len(row)):
-        cell_same_row = clean_text(row[c]) if c < len(row) else ""
+    if date_col_idx > 0:
+        return [date_col_idx], 0
 
-        if parse_schedule_date(cell_same_row, YEAR):
-            break
-
-        next_cell = clean_text(next_row[c]) if c < len(next_row) else ""
-
-        if normalize(next_cell) in {"morning", "evening"}:
-            person_cols.append(c)
-
-    if person_cols:
-        return person_cols, date_col_idx
-
-    # Otherwise, the date column itself contains the names and the role is to the left.
-    role_col = max(0, date_col_idx - 1)
-    return [date_col_idx], role_col
+    return [date_col_idx], max(0, date_col_idx - 1)
 
 
 def extract_serving_from_schedule_tab(ws, year):
@@ -328,7 +360,11 @@ def extract_serving_from_schedule_tab(ws, year):
             if service_date.weekday() != 6:
                 continue
 
-            person_cols, role_col = find_person_columns(values, row_idx, col_idx)
+            person_cols, role_col = find_person_columns(
+                values,
+                row_idx,
+                col_idx,
+            )
 
             for r in range(row_idx + 1, len(values)):
                 if role_col >= len(values[r]):
@@ -336,9 +372,11 @@ def extract_serving_from_schedule_tab(ws, year):
 
                 position = clean_text(values[r][role_col])
 
-                # Stop when a new date/header starts in the role column
                 if parse_schedule_date(position, year):
                     break
+
+                if is_stop_row(position):
+                    continue
 
                 if not position:
                     continue
@@ -349,7 +387,6 @@ def extract_serving_from_schedule_tab(ws, year):
 
                     cell_value = values[r][person_col]
 
-                    # Avoid treating new date headings as names
                     if parse_schedule_date(cell_value, year):
                         continue
 
@@ -413,10 +450,16 @@ def collect_all_serving_data(roster_spreadsheet, review_spreadsheet):
     serving_df = pd.DataFrame(all_records)
 
     if serving_df.empty:
-        serving_df = pd.DataFrame(columns=["Name", "Date", "Position", "Source Tab"])
+        serving_df = pd.DataFrame(
+            columns=["Name", "Date", "Position", "Source Tab"]
+        )
     else:
-        serving_df = serving_df.drop_duplicates(subset=["Name", "Date", "Position"])
-        serving_df = serving_df.sort_values(["Name", "Date", "Position"])
+        serving_df = serving_df.drop_duplicates(
+            subset=["Name", "Date", "Position"]
+        )
+        serving_df = serving_df.sort_values(
+            ["Name", "Date", "Position"]
+        )
 
     errors_df = pd.DataFrame(counting_errors)
 
@@ -512,7 +555,7 @@ def build_statistics_dataframe(review_df):
     if not stats.empty:
         stats = stats.sort_values(
             ["Total Serves", "Name"],
-            ascending=[False, True]
+            ascending=[False, True],
         )
 
     return stats
@@ -591,7 +634,7 @@ st.title("uKids Serving Review")
 st.info(
     "This app reads the roster, checks names against ServingBase, "
     "then checks each position against Counting Rules. "
-    "If a position is not found in Counting Rules, it is written to Counting Errors and the review is not updated."
+    "For the main roster layout, positions are read from column A."
 )
 
 st.write("Required tabs in the review spreadsheet:")
