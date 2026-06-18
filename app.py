@@ -73,15 +73,17 @@ def get_or_create_sheet(spreadsheet, title, rows=1000, cols=80):
 
 
 # =========================
-# HELPERS
+# TEXT HELPERS
 # =========================
 
 def clean_text(value):
     if value is None:
         return ""
 
-    value = str(value).strip()
+    value = str(value)
     value = value.replace("\n", " ")
+    value = value.replace("\xa0", " ")
+    value = value.strip()
     value = re.sub(r"\s+", " ", value)
 
     return value
@@ -98,18 +100,22 @@ def clean_name(value):
 
 
 def normalize(value):
-    return clean_text(value).lower()
+    value = clean_text(value).lower()
+    value = value.replace("–", "-")
+    value = value.replace("—", "-")
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
 
 
 def normalize_name(value):
-    return clean_name(value).lower()
+    return normalize(clean_name(value))
 
 
 def split_names(cell_value):
     if not cell_value:
         return []
 
-    text = str(cell_value).strip()
+    text = clean_text(cell_value)
 
     parts = re.split(r";|,|&|\band\b", text)
 
@@ -151,7 +157,7 @@ def parse_schedule_date(value, fallback_year):
     if not value:
         return None
 
-    value = str(value).strip()
+    value = clean_text(value)
 
     match = re.search(r"(\d{1,2})\s+([A-Za-z]+)", value)
 
@@ -197,7 +203,7 @@ def setup_counting_rules_sheet(review_spreadsheet):
     ws = get_or_create_sheet(
         review_spreadsheet,
         COUNTING_RULES_TAB,
-        rows=300,
+        rows=500,
         cols=5,
     )
 
@@ -255,13 +261,28 @@ def get_counting_rules(review_spreadsheet):
     setup_counting_rules_sheet(review_spreadsheet)
 
     ws = review_spreadsheet.worksheet(COUNTING_RULES_TAB)
-    rows = ws.get_all_records()
+    values = ws.get_all_values()
+
+    if not values:
+        return {}
+
+    header = [clean_text(h) for h in values[0]]
+
+    try:
+        position_idx = header.index(COUNTING_RULE_POSITION_COLUMN)
+        counts_idx = header.index(COUNTING_RULE_COUNTS_COLUMN)
+    except ValueError:
+        st.error(
+            "Counting Rules headings must be exactly: "
+            "`Position` and `Counts As Serving`"
+        )
+        return {}
 
     rules = {}
 
-    for row in rows:
-        position = clean_text(row.get(COUNTING_RULE_POSITION_COLUMN, ""))
-        counts_value = clean_text(row.get(COUNTING_RULE_COUNTS_COLUMN, ""))
+    for row in values[1:]:
+        position = clean_text(row[position_idx]) if position_idx < len(row) else ""
+        counts_value = clean_text(row[counts_idx]) if counts_idx < len(row) else ""
 
         if not position:
             continue
@@ -321,18 +342,9 @@ def is_stop_row(position):
 
 
 def find_person_columns(values, header_row_idx, date_col_idx):
-    """
-    Main roster layout:
-    Column A contains positions.
-    Date columns contain serving girls.
-
-    Example:
-    A = Position
-    B = 7 June
-    C = 14 June
-    D = 21 June
-    """
-
+    # Your main roster layout:
+    # Column A = Position
+    # Date columns = serving girl names
     if date_col_idx > 0:
         return [date_col_idx], 0
 
@@ -360,11 +372,7 @@ def extract_serving_from_schedule_tab(ws, year):
             if service_date.weekday() != 6:
                 continue
 
-            person_cols, role_col = find_person_columns(
-                values,
-                row_idx,
-                col_idx,
-            )
+            person_cols, role_col = find_person_columns(values, row_idx, col_idx)
 
             for r in range(row_idx + 1, len(values)):
                 if role_col >= len(values[r]):
@@ -430,6 +438,7 @@ def collect_all_serving_data(roster_spreadsheet, review_spreadsheet):
             if count_result is None:
                 counting_errors.append({
                     "Position": record["Position"],
+                    "Normalized Position": normalize(record["Position"]),
                     "First Found In": record["Source Tab"],
                     "Date": display_date(record["Date"]),
                     "Example Name": serving_base[normalized_name],
@@ -457,21 +466,26 @@ def collect_all_serving_data(roster_spreadsheet, review_spreadsheet):
         serving_df = serving_df.drop_duplicates(
             subset=["Name", "Date", "Position"]
         )
-        serving_df = serving_df.sort_values(
-            ["Name", "Date", "Position"]
-        )
+        serving_df = serving_df.sort_values(["Name", "Date", "Position"])
 
     errors_df = pd.DataFrame(counting_errors)
 
     if errors_df.empty:
         errors_df = pd.DataFrame(
-            columns=["Position", "First Found In", "Date", "Example Name", "Status"]
+            columns=[
+                "Position",
+                "Normalized Position",
+                "First Found In",
+                "Date",
+                "Example Name",
+                "Status",
+            ]
         )
     else:
         errors_df = errors_df.drop_duplicates(subset=["Position"])
         errors_df = errors_df.sort_values(["Position"])
 
-    return serving_df, errors_df
+    return serving_df, errors_df, counting_rules
 
 
 # =========================
@@ -580,7 +594,7 @@ def update_review_and_stats():
     roster_spreadsheet = client.open_by_key(ROSTER_SPREADSHEET_ID)
     review_spreadsheet = client.open_by_key(REVIEW_SPREADSHEET_ID)
 
-    serving_df, errors_df = collect_all_serving_data(
+    serving_df, errors_df, counting_rules = collect_all_serving_data(
         roster_spreadsheet,
         review_spreadsheet,
     )
@@ -595,7 +609,7 @@ def update_review_and_stats():
     write_dataframe_to_sheet(errors_ws, errors_df)
 
     if not errors_df.empty:
-        return serving_df, None, None, errors_df
+        return serving_df, None, None, errors_df, counting_rules
 
     review_df = build_review_dataframe(serving_df, review_spreadsheet)
     stats_df = build_statistics_dataframe(review_df)
@@ -617,7 +631,7 @@ def update_review_and_stats():
     write_dataframe_to_sheet(review_ws, review_df)
     write_dataframe_to_sheet(stats_ws, stats_df)
 
-    return serving_df, review_df, stats_df, errors_df
+    return serving_df, review_df, stats_df, errors_df, counting_rules
 
 
 # =========================
@@ -649,7 +663,11 @@ with st.expander("Roster tabs this app will read"):
 
 if st.button("Update Serving Review", type="primary"):
     with st.spinner("Reading roster and checking counting rules..."):
-        serving_df, review_df, stats_df, errors_df = update_review_and_stats()
+        serving_df, review_df, stats_df, errors_df, counting_rules = update_review_and_stats()
+
+    with st.expander("Debug: Counting rules loaded"):
+        st.write(f"Total counting rules loaded: {len(counting_rules)}")
+        st.write(sorted(list(counting_rules.keys()))[:100])
 
     if not errors_df.empty:
         st.error(
